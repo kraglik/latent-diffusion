@@ -1,3 +1,7 @@
+"""
+https://github.com/tatp22/multidim-positional-encoding
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
