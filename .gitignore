@@ -1,5 +1,6 @@
 checkpoints/
 logs/
+data/
 *.pyc
 *.pth
 *.pt
