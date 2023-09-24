@@ -10,7 +10,7 @@ from torchvision.transforms import InterpolationMode
 from diffusion.datasets import ImagesDataset
 from diffusion.models import LatentDiffusion
 from diffusion.modules import Autoencoder, Encoder, Decoder, UNet
-from diffusion.samplers.ddim import DDIMSampler
+from diffusion.samplers import DDPMSampler
 
 
 def load_autoencoder(path: str) -> Autoencoder:
@@ -60,7 +60,7 @@ def main() -> None:
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=16,
+        batch_size=8,
         num_workers=8,
         drop_last=True,
         shuffle=True,
@@ -77,7 +77,7 @@ def main() -> None:
         channel_multipliers=[1, 1, 2, 4],
         attention_levels=[0, 1, 2, 3],
         num_unet_blocks=2,
-        transformer_heads=2,
+        transformer_heads=4,
     )
     autoencoder = load_autoencoder("checkpoints/vae.ckpt")
 
@@ -85,12 +85,9 @@ def main() -> None:
         unet=unet,
         autoencoder=autoencoder,
         learning_rate=5e-4,
-        linear_start=0.00085,
-        linear_end=0.02,
-        n_steps=150,
-        latent_scaling_factor=1.0,
+        latent_scaling_factor=0.35,  # 0.45
     )
-    model.set_sampler(DDIMSampler(model, n_steps=20, ddim_eta=0.0))
+    model.set_sampler(DDPMSampler(model, n_steps=50))
 
     trainer = pl.Trainer(
         precision=32,

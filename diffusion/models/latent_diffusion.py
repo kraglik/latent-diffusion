@@ -13,9 +13,6 @@ class LatentDiffusion(pl.LightningModule):
         unet: UNet,
         autoencoder: Autoencoder,
         latent_scaling_factor: float,
-        n_steps: int,
-        linear_start: float,
-        linear_end: float,
         learning_rate: float = 1e-3,
     ) -> None:
         super().__init__()
@@ -23,25 +20,20 @@ class LatentDiffusion(pl.LightningModule):
         self.unet = unet
         self.autoencoder = autoencoder.eval()
 
-        self.n_steps = n_steps
-
         self.latent_scaling_factor = latent_scaling_factor
-        beta = torch.linspace(linear_start ** 0.5, linear_end ** 0.5, n_steps, dtype=torch.float64) ** 2
-        self.beta = nn.Parameter(beta.to(torch.float32), requires_grad=False)
-        alpha = 1. - beta
-        alpha_bar = torch.cumprod(alpha, dim=0)
-        self.alpha_bar = nn.Parameter(alpha_bar.to(torch.float32), requires_grad=False)
-
         self.learning_rate = learning_rate
 
         self.sampler = None
+        self.log_var = nn.Parameter(torch.ones(size=()) * 0.0)
 
     def set_sampler(self, sampler):
         self.sampler = sampler
 
+    @torch.inference_mode()
     def encode_sample(self, image: torch.Tensor) -> torch.Tensor:
         return self.autoencoder.encode(image).sample() * self.latent_scaling_factor
 
+    @torch.inference_mode()
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         return self.autoencoder.decode(z / self.latent_scaling_factor)
 
@@ -49,14 +41,23 @@ class LatentDiffusion(pl.LightningModule):
         return self.unet(x, time_embedding, cond)
 
     def training_step(self, batch: torch.Tensor, batch_idx: int) -> torch.Tensor:
-        if batch_idx % 100 == 0:
+        if batch_idx % 200 == 0:
             self.restore_image(batch[:1])
-            self.generate_image(size=(32, 32))
+            self.generate_image(size=(32, 32), name="standard")
 
-        return self.calculate_loss(batch)
+        loss = self.calculate_loss(batch)
+        self.log('loss', loss, on_step=True, prog_bar=True, logger=True)
+
+        return loss
 
     def calculate_loss(self, img):
-        times = torch.randint(0, self.sampler.denoising_steps, (img.shape[0],), device=self.device, dtype=torch.long)
+        times = torch.randint(
+            0,
+            self.sampler.denoising_steps,
+            (img.shape[0],),
+            device=self.device,
+            dtype=torch.long,
+        )
 
         z = self.encode_sample(img)
         noise = torch.randn_like(z)
@@ -64,9 +65,7 @@ class LatentDiffusion(pl.LightningModule):
         x = self.sampler.q_sample(z, t=times, eps=noise)
         eps_theta = self(x, times, cond=None)
 
-        loss = fun.mse_loss(eps_theta, noise, reduction='sum')
-
-        self.log('loss', loss, on_step=True, prog_bar=True, logger=True)
+        loss = fun.mse_loss(eps_theta, noise, reduction='sum') / img.shape[0]
 
         return loss
 
@@ -84,7 +83,7 @@ class LatentDiffusion(pl.LightningModule):
         noise = torch.randn_like(z)
         x = self.sampler.q_sample(z, eps=noise, t=times)
 
-        images, steps, noises = self.sampler.paint(x, None, self.sampler.denoising_steps- 1)
+        images, steps, noises = self.sampler.paint(x, None, times.item())
 
         images = self.decode(images)
         steps = self.decode(steps.squeeze(1))
@@ -99,7 +98,7 @@ class LatentDiffusion(pl.LightningModule):
         self.logger.experiment.add_images("restoration_noises", noises)
 
     @torch.inference_mode()
-    def generate_image(self, size: (int, int)) -> None:
+    def generate_image(self, size: (int, int), name: str) -> None:
         z = torch.randn(1, 8, *size, device=self.device)
 
         images, steps, noises = self.sampler.paint(z, None, self.sampler.denoising_steps - 1)
@@ -112,9 +111,15 @@ class LatentDiffusion(pl.LightningModule):
         steps = steps.clamp(0, 1)
         noises = noises.clamp(0, 1)
 
-        self.logger.experiment.add_images("generation_denoised", images)
-        self.logger.experiment.add_images("generation_steps", steps)
-        self.logger.experiment.add_images("generation_noises", noises)
+        self.logger.experiment.add_images(f"generation_denoised_{name}", images)
+        self.logger.experiment.add_images(f"generation_steps_{name}", steps)
+        self.logger.experiment.add_images(f"generation_noises_{name}", noises)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.unet.parameters(), lr=self.learning_rate)
+        return torch.optim.AdamW(
+            (
+                list(self.unet.parameters())
+                + [self.log_var]
+            ),
+            lr=self.learning_rate,
+        )

@@ -84,7 +84,7 @@ class UNet(nn.Module):
             layer_input_channels = input_channels.pop()
             residual_blocks = [
                 ResidualBlock(
-                    (channels + layer_input_channels) if j == 0 else channels_list[i],
+                    (channels if j == 0 else channels_list[i]) + layer_input_channels,
                     time_embedding_dims,
                     out_channels=channels_list[i],
                 )
@@ -128,17 +128,16 @@ class UNet(nn.Module):
         x = self.in_conv(x)
 
         for module in self.input_blocks:
-            h, x = module(x, time_embedding, cond)
-            x_input_block.append(h)
+            out_xs, x = module(x, time_embedding, cond)
+            x_input_block.append(out_xs)
 
         x = self.middle_block_residual_1(x, time_embedding)
         x = self.middle_block_transformer(x, cond)
         x = self.middle_block_residual_2(x, time_embedding)
 
-        for i, module in enumerate(self.output_blocks):
-            x_in = x_input_block.pop()
-            x = torch.cat([x, x_in], dim=1)
-            _, x = module(x, time_embedding, cond)
+        for module in self.output_blocks:
+            xs_in = x_input_block.pop()
+            _, x = module(x, time_embedding, cond, xs_in=xs_in)
 
         return self.out(x)
 
@@ -163,8 +162,8 @@ class UNetBlock(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.residual_blocks = residual_blocks
-        self.image_transformers = image_transformers
+        self.residual_blocks = nn.ModuleList(residual_blocks)
+        self.image_transformers = nn.ModuleList(image_transformers) if image_transformers else None
         self.sample = sample
 
     def forward(
@@ -172,14 +171,25 @@ class UNetBlock(nn.Module):
         x: torch.Tensor,
         time_embedding: torch.Tensor,
         cond: torch.Tensor,
+        xs_in: Optional[list[torch.Tensor]] = None,
     ) -> (torch.Tensor, torch.Tensor):
+        out_xs: list[torch.Tensor] = []
+
         if self.image_transformers is None:
             for block in self.residual_blocks:
+                if xs_in is not None:
+                    x = torch.cat([x, xs_in.pop()], dim=1)
+
                 x = block(x, time_embedding)
+                out_xs.append(x)
 
         else:
             for block, transformer in zip(self.residual_blocks, self.image_transformers):
+                if xs_in is not None:
+                    x = torch.cat([x, xs_in.pop()], dim=1)
+
                 x = block(x, time_embedding)
                 x = transformer(x, cond)
+                out_xs.append(x)
 
-        return x, self.sample(x)
+        return out_xs, self.sample(x)
